@@ -3162,13 +3162,31 @@ local function tab_display_title(tab, effective_config)
   local active_pane = tab and tab.active_pane or nil
   local text = tab and tab.tab_title or ''
 
-  if text == '' and tab then
+  local function is_path_like(path_like)
+    return path_like:match('^/') or path_like:match('^~') or path_like:find('/', 1, true)
+  end
+
+  local function assign_tab_title()
     local parent, current = tab_path_parts(tab)
     local basename_only = effective_config and effective_config.tab_title_show_basename_only
-    text = current
+    local _text = current
     if not basename_only and parent ~= '' and current ~= '' then
-      text = parent .. '/' .. current
+      _text = parent .. '/' .. current
     end
+    return _text
+  end
+
+  if text == '' and active_pane then
+    local t = active_pane.title or ''
+    if is_path_like(t) then
+      text = assign_tab_title()
+    else
+      text = t
+    end
+  end
+
+  if text == '' and tab then
+    text = assign_tab_title()
   end
 
   if text == '' and active_pane then

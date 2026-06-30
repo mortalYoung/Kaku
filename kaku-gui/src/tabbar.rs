@@ -5,7 +5,10 @@ use mlua::FromLua;
 use mux::pane::CachePolicy;
 use mux::tab::TabId;
 use mux::Mux;
+use std::collections::HashMap;
 use std::path::Path;
+use std::sync::Mutex;
+use std::time::Instant;
 use termwiz::cell::{unicode_column_width, Cell, CellAttributes};
 use termwiz::color::{AnsiColor, ColorSpec};
 use termwiz::escape::csi::Sgr;
@@ -307,6 +310,128 @@ fn tab_multi_pane_title(tab_id: TabId) -> Option<String> {
     Some(parts.join(" \u{00b7} "))
 }
 
+struct TitleDebounceState {
+    displayed: TitleText,
+    displayed_raw: String,
+    displayed_is_path: bool,
+    changed_at: Instant,
+    pending: Option<TitleText>,
+    pending_raw: String,
+}
+
+lazy_static::lazy_static! {
+    static ref TITLE_DEBOUNCE: Mutex<HashMap<TabId, TitleDebounceState>> =
+        Mutex::new(HashMap::new());
+}
+
+pub const THROTTLE_MS: u64 = 300;
+
+fn is_path_like(s: &str) -> bool {
+    s.starts_with('/') || s.starts_with('~') || s.contains('/')
+}
+
+fn extract_title_text(t: &TitleText) -> String {
+    let mut s = String::new();
+    for item in &t.items {
+        if let FormatItem::Text(text) = item {
+            s.push_str(text);
+        }
+    }
+    s
+}
+
+/// Throttle path→non-path transitions (300ms).
+/// Other transitions are immediate. Cancels pending throttle
+/// when transitioning away from non-path.
+/// Prevents brief shell-OSC title changes from flickering.
+fn title_with_debounce(
+    tab: &TabInformation,
+    compute: impl FnOnce() -> TitleText,
+) -> TitleText {
+    let new_title = compute();
+    let raw = extract_title_text(&new_title);
+    let is_path = is_path_like(&raw);
+    let tab_id = tab.tab_id;
+    let mut debounce = TITLE_DEBOUNCE.lock().unwrap();
+    let now = Instant::now();
+    let throttle_dur = std::time::Duration::from_millis(THROTTLE_MS);
+
+    let state = match debounce.get_mut(&tab_id) {
+        None => {
+            debounce.insert(
+                tab_id,
+                TitleDebounceState {
+                    displayed: new_title.clone(),
+                    displayed_raw: raw,
+                    displayed_is_path: is_path,
+                    changed_at: now,
+                    pending: None,
+                    pending_raw: String::new(),
+                },
+            );
+            return new_title;
+        }
+        Some(s) => s,
+    };
+
+    // Flush expired throttle
+    if state.pending.is_some() && now - state.changed_at >= throttle_dur {
+        state.displayed = state.pending.take().unwrap();
+        state.displayed_raw = std::mem::take(&mut state.pending_raw);
+        state.displayed_is_path = false;
+        state.changed_at = now;
+    }
+
+    if raw == state.displayed_raw {
+        // Same title: no visual change
+        state.changed_at = now;
+        return state.displayed.clone();
+    }
+
+    if !state.displayed_is_path {
+        // Non-path → anything: immediate, cancel throttle
+        state.pending = None;
+        state.pending_raw.clear();
+        state.displayed = new_title;
+        state.displayed_raw = raw;
+        state.displayed_is_path = is_path;
+        state.changed_at = now;
+        state.displayed.clone()
+    } else if is_path {
+        // Path → Path: immediate, cancel throttle
+        state.pending = None;
+        state.pending_raw.clear();
+        state.displayed = new_title;
+        state.displayed_raw = raw;
+        state.changed_at = now;
+        state.displayed.clone()
+    } else {
+        // Path → Non-path: throttle
+        if state.pending.is_some() && raw == state.pending_raw {
+            state.changed_at = now; // extend timer
+        } else {
+            state.pending = Some(new_title);
+            state.pending_raw = raw;
+            state.changed_at = now;
+        }
+        state.displayed.clone()
+    }
+}
+
+/// Returns true if any of the given tabs has a pending throttle
+/// that needs to be flushed on a future render tick.
+pub fn has_pending_throttle(tabs: &[TabInformation]) -> bool {
+    let debounce = TITLE_DEBOUNCE.lock().unwrap();
+    tabs.iter()
+        .any(|t| debounce.get(&t.tab_id).is_some_and(|s| s.pending.is_some()))
+}
+
+/// Remove stale debounce entries for tabs that no longer exist.
+pub fn cleanup_debounce(tabs: &[TabInformation]) {
+    let mut debounce = TITLE_DEBOUNCE.lock().unwrap();
+    debounce.retain(|id, _| tabs.iter().any(|t| t.tab_id == *id));
+}
+
 fn compute_tab_title_from_precomputed(
     tab: &TabInformation,
     config: &ConfigHandle,
@@ -319,7 +444,8 @@ fn compute_tab_title_from_precomputed(
             }
         }
     }
-    match precomputed {
+
+    title_with_debounce(tab, || match precomputed {
         Some(title) => title,
         None => {
             if let Some(pane) = &tab.active_pane {
@@ -341,7 +467,7 @@ fn compute_tab_title_from_precomputed(
                 }
             }
         }
-    }
+    })
 }
 
 fn pane_cwd_title(pane: &PaneInformation) -> Option<String> {

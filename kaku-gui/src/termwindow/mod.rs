@@ -3476,6 +3476,7 @@ impl TermWindow {
             _ => return,
         };
         let tabs = self.get_tab_information();
+        crate::tabbar::cleanup_debounce(&tabs);
         let panes = self.get_pane_information();
         let active_tab = tabs.iter().find(|t| t.is_active).cloned();
         let active_pane = panes.iter().find(|p| p.is_active).cloned();
@@ -3521,6 +3522,21 @@ impl TermWindow {
             if let Some(window) = self.window.as_ref() {
                 window.invalidate();
             }
+        }
+
+        // If a tab has a throttle pending, schedule a re-check after 300ms
+        // so the flush happens even without new render events.
+        use crate::tabbar::has_pending_throttle;
+        if has_pending_throttle(&tabs) && !self.title_update_queued {
+            let window = self.window.clone();
+            self.title_update_queued = true;
+            promise::spawn::spawn_into_main_thread(async move {
+                Timer::after(std::time::Duration::from_millis(crate::tabbar::THROTTLE_MS)).await;
+                if let Some(window) = window {
+                    window.notify(TermWindowNotif::EmitTitleUpdate);
+                }
+            })
+            .detach();
         }
 
         let num_tabs = window.len();
