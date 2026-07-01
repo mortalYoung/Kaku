@@ -1045,6 +1045,11 @@ pub struct TermWindow {
 
     line_quad_cache: RefCell<LfuCache<LineQuadCacheKey, LineQuadCacheValue>>,
 
+    /// Caches font.shape() results by text string for box model rendering.
+    /// Palette command text is stable across keystrokes, so shaping it once
+    /// per unique string eliminates the dominant cost in compute_element.
+    box_text_shape_cache: RefCell<HashMap<String, Vec<wezterm_font::GlyphInfo>>>,
+
     last_status_call: Instant,
     last_pane_output_invalidate: Option<Instant>,
     /// True when an output invalidation was suppressed by the 8ms coalescing
@@ -1699,6 +1704,7 @@ impl TermWindow {
                 |config| config.line_to_ele_shape_cache_size,
                 &config,
             )),
+            box_text_shape_cache: RefCell::new(HashMap::new()),
             last_status_call: Instant::now(),
             last_pane_output_invalidate: None,
             pending_output_invalidate: false,
@@ -2202,6 +2208,7 @@ impl TermWindow {
             TermWindowNotif::InvalidateShapeCache => {
                 self.shape_generation += 1;
                 self.shape_cache.borrow_mut().clear();
+                self.box_text_shape_cache.borrow_mut().clear();
                 self.invalidate_modal();
                 window.invalidate();
             }
@@ -3091,6 +3098,7 @@ impl TermWindow {
         self.line_to_ele_shape_cache
             .borrow_mut()
             .update_config(&config);
+        self.box_text_shape_cache.borrow_mut().clear();
         self.fancy_tab_bar.take();
         self.invalidate_fancy_tab_bar();
         self.invalidate_modal();

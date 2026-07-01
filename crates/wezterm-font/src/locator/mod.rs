@@ -229,7 +229,9 @@ pub fn new_locator(locator: FontLocatorSelection) -> Arc<dyn FontLocator + Send 
         }
         FontLocatorSelection::CoreText => {
             #[cfg(target_os = "macos")]
-            return Arc::new(core_text::CoreTextFontLocator {});
+            return Arc::new(core_text::CoreTextFontLocator {
+                parsed_cache: Default::default(),
+            });
             #[cfg(not(target_os = "macos"))]
             panic!("CoreText not compiled in");
         }

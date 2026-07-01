@@ -1090,8 +1090,9 @@ impl Modal for CommandPalette {
                 self.updated_input();
                 needs_invalidate = true;
             }
-            (KeyCode::Char('u'), KeyModifiers::CTRL) => {
-                // CTRL-u to clear the selection
+            (KeyCode::Backspace, KeyModifiers::SUPER)
+            | (KeyCode::Char('u'), KeyModifiers::CTRL) => {
+                // Cmd+Backspace or Ctrl+U to clear entire selection
                 let mut selection = self.selection.borrow_mut();
                 selection.clear();
                 self.updated_input();

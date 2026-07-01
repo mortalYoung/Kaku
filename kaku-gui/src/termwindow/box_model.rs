@@ -597,15 +597,24 @@ impl super::TermWindow {
             ElementContent::Text(s) => {
                 let window = self.window.as_ref().unwrap().clone();
                 let direction = wezterm_bidi::Direction::LeftToRight;
-                let infos = element.font.shape(
-                    &s,
-                    move || window.notify(TermWindowNotif::InvalidateShapeCache),
-                    BlockKey::filter_out_synthetic,
-                    element.presentation,
-                    direction,
-                    None,
-                    None,
-                )?;
+                let infos = {
+                    let mut cache = self.box_text_shape_cache.borrow_mut();
+                    let key = format!("{:?}\x00{}", element.presentation, s);
+                    cache.entry(key).or_insert_with(|| {
+                        element
+                            .font
+                            .shape(
+                                &s,
+                                move || window.notify(TermWindowNotif::InvalidateShapeCache),
+                                BlockKey::filter_out_synthetic,
+                                element.presentation,
+                                direction,
+                                None,
+                                None,
+                            )
+                            .unwrap_or_default()
+                    }).clone()
+                };
                 let mut computed_cells = vec![];
                 let mut glyph_cache = context.gl_state.glyph_cache.borrow_mut();
                 let mut pixel_width = 0.0;

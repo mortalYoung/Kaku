@@ -14,7 +14,8 @@ use core_text::font_descriptor::*;
 use objc::*;
 use rangeset::RangeSet;
 use std::cmp::Ordering;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::sync::Mutex;
 
 lazy_static::lazy_static! {
     static ref FALLBACK: Vec<ParsedFont> = build_fallback_list();
@@ -31,7 +32,11 @@ extern "C" {
 
 /// A FontLocator implemented using the system font loading
 /// functions provided by core text.
-pub struct CoreTextFontLocator {}
+pub struct CoreTextFontLocator {
+    /// Cache parsed font info by file path to avoid re-parsing
+    /// the same font files (e.g. TTCs) across multiple attr lookups.
+    pub(crate) parsed_cache: Mutex<HashMap<std::path::PathBuf, Vec<ParsedFont>>>,
+}
 
 fn descriptor_from_attr(attr: &FontAttributes) -> anyhow::Result<CFArray<CTFontDescriptor>> {
     let family_name = attr
@@ -88,7 +93,20 @@ impl FontLocator for CoreTextFontLocator {
                 Ok(descriptors) => {
                     let mut handles = vec![];
                     for descriptor in descriptors.iter() {
-                        handles.append(&mut handles_from_descriptor(&descriptor));
+                        if let Some(path) = descriptor.font_path() {
+                            let mut cache = self.parsed_cache.lock().unwrap();
+                            let parsed = cache.entry(path.clone()).or_insert_with(|| {
+                                let mut result = vec![];
+                                let source = FontDataSource::OnDisk(path);
+                                let _ = crate::parser::parse_and_collect_font_info(
+                                    &source,
+                                    &mut result,
+                                    FontOrigin::CoreText,
+                                );
+                                result
+                            });
+                            handles.extend(parsed.iter().cloned());
+                        }
                     }
                     log::trace!("core text matched {:?} to {:#?}", attr, handles);
 
