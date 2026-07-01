@@ -233,6 +233,28 @@ fn call_format_tab_title_hover(
     }
 }
 
+/// Emit the `tab-display-title` event in Lua — the same event used by the
+/// tab bar to render pane titles — so the hover popup shows text consistent
+/// with the tab bar.
+pub fn call_pane_display_title(
+    pane: &PaneInformation,
+    config: &ConfigHandle,
+) -> Option<String> {
+    config::run_immediate_with_lua_config(|lua| -> anyhow::Result<Option<String>> {
+        let lua = lua.ok_or_else(|| anyhow::anyhow!("no lua"))?;
+        let v = config::lua::emit_sync_callback(
+            &*lua,
+            ("tab-display-title".to_string(), (pane.clone(), (**config).clone())),
+        )?;
+        match v {
+            mlua::Value::String(s) => Ok(Some(s.to_str()?.to_string())),
+            _ => Ok(None),
+        }
+    })
+    .ok()
+    .flatten()
+}
+
 /// pct is a percentage in the range 0-100.
 /// We want to map it to one of the nerdfonts:
 ///
@@ -1231,6 +1253,7 @@ mod test {
             is_active,
             is_last_active: false,
             active_pane: None,
+            panes: vec![],
             window_id: 0,
             tab_title: title.to_string(),
         }

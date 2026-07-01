@@ -1,8 +1,11 @@
 use crate::quad::TripleLayerQuadAllocator;
 use crate::termwindow::render::{forces_opaque_kaku_tui_window_background, RenderScreenLineParams};
+use crate::termwindow::PaneInformation;
 use crate::utilsprites::RenderMetrics;
-use config::ConfigHandle;
+use config::{ConfigHandle, TabBarColors};
 use mux::renderable::RenderableDimensions;
+use termwiz::cell::unicode_column_width;
+use termwiz::surface::SEQ_ZERO;
 use wezterm_term::color::ColorAttribute;
 use window::color::LinearRgba;
 
@@ -167,6 +170,134 @@ impl crate::TermWindow {
             },
             layers,
         )?;
+
+        // --- Multi-pane hover popup: render pane list above tab bar ---
+        if self.show_tab_popup {
+            let tab_ui_item = self.ui_items.iter().find(|ui| {
+                matches!(
+                    ui.item_type,
+                    crate::termwindow::UIItemType::TabBar(
+                        crate::tabbar::TabBarItem::Tab { tab_idx, .. },
+                    ) if self.popup_tab_idx == Some(tab_idx)
+                )
+            });
+
+            if let Some(tab_ui) = tab_ui_item {
+                let cell_h = tab_metrics.cell_size.height as f32;
+                let popup_width_px = tab_ui.width as f32;
+                let popup_width_cells = tab_ui.width / tab_metrics.cell_size.width as usize;
+                let tab_left_px = tab_ui.x as f32;
+
+                // Get TabInformation for the hovered tab
+                let tab_info = self.popup_tab_idx.and_then(|idx| {
+                    self.get_tab_information()
+                        .into_iter()
+                        .find(|t| t.tab_index == idx)
+                });
+
+                if let Some(ref tab_info) = tab_info {
+                    let non_active: Vec<&PaneInformation> =
+                        tab_info.panes.iter().filter(|p| !p.is_active).collect();
+                    let num_rows = non_active.len();
+                    let popup_px = num_rows as f32 * cell_h;
+                    let popup_top = 0f32.max(tab_bar_y - popup_px);
+
+                    let tab_bar_colors = self
+                        .config
+                        .resolved_palette
+                        .tab_bar
+                        .clone()
+                        .unwrap_or_else(TabBarColors::default);
+
+                    for (row, pane) in non_active.iter().enumerate() {
+                        let hovered = self.popup_hover_row == Some(row);
+
+                        let attrs = if hovered {
+                            tab_bar_colors.inactive_tab_hover().as_cell_attributes()
+                        } else {
+                            tab_bar_colors.inactive_tab().as_cell_attributes()
+                        };
+
+                        // Get title from tab_display_title (Lua), same as tab bar
+                        let title = crate::tabbar::call_pane_display_title(pane, &self.config)
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| pane.title.clone());
+
+                        let row_y = popup_top + row as f32 * cell_h;
+
+                        let mut popup_line = wezterm_term::Line::with_width(0, SEQ_ZERO);
+                        for fill in 0..popup_width_cells {
+                            popup_line.insert_cell(
+                                fill,
+                                wezterm_term::Cell::blank_with_attrs(attrs.clone()),
+                                popup_width_cells,
+                                SEQ_ZERO,
+                            );
+                        }
+                        // Left-align title text with 1-cell padding
+                        let mut col = 1;
+                        for c in title.chars() {
+                            let cw = unicode_column_width(&c.to_string(), None);
+                            if col + cw > popup_width_cells {
+                                break;
+                            }
+                            popup_line.insert_cell(
+                                col,
+                                wezterm_term::Cell::new_grapheme(&c.to_string(), attrs.clone(), None),
+                                popup_width_cells,
+                                SEQ_ZERO,
+                            );
+                            col += cw;
+                        }
+
+                        self.render_screen_line(
+                            RenderScreenLineParams {
+                                top_pixel_y: row_y,
+                                left_pixel_x: tab_left_px,
+                                pixel_width: popup_width_px,
+                                stable_line_idx: None,
+                                line: &popup_line,
+                                selection: 0..0,
+                                cursor: &Default::default(),
+                                palette: &palette,
+                                dims: &RenderableDimensions {
+                                    cols: popup_width_cells,
+                                    physical_top: 0,
+                                    scrollback_rows: 0,
+                                    scrollback_top: 0,
+                                    viewport_rows: 1,
+                                    dpi: self.terminal_size.dpi,
+                                    pixel_height: tab_metrics.cell_size.height as usize,
+                                    pixel_width: popup_width_px as usize,
+                                    reverse_video: false,
+                                },
+                                config: &self.config,
+                                cursor_border_color: LinearRgba::default(),
+                                foreground: palette.foreground.to_linear(),
+                                pane: None,
+                                is_active: true,
+                                selection_fg: LinearRgba::default(),
+                                selection_bg: LinearRgba::default(),
+                                cursor_fg: LinearRgba::default(),
+                                cursor_bg: LinearRgba::default(),
+                                cursor_is_default_color: true,
+                                white_space,
+                                filled_box,
+                                window_is_transparent: false,
+                                default_bg: LinearRgba::default(),
+                                style: None,
+                                font: None,
+                                use_pixel_positioning: false,
+                                render_metrics: tab_metrics,
+                                shape_key: None,
+                            password_input: false,
+                        },
+                        layers,
+                    )?;
+                    }
+                }
+            }
+        }
 
         Ok(())
     }

@@ -9,7 +9,7 @@ use ::window::{
 };
 use config::keyassignment::{KeyAssignment, MouseEventTrigger, SpawnTabDomain};
 use config::{MouseEventAltScreen, SelectionWheelScrollBehavior};
-use mux::pane::{CachePolicy, Pane, WithPaneLines};
+use mux::pane::{CachePolicy, Pane, PaneId, WithPaneLines};
 use mux::tab::SplitDirection;
 use mux::Mux;
 use mux_lua::MuxPane;
@@ -802,6 +802,99 @@ impl super::TermWindow {
             None
         };
 
+        // --- Multi-pane hover popup area tracking ---
+        if self.show_tab_popup {
+            let tab_ui = self.ui_items.iter().find(|ui| {
+                matches!(
+                    ui.item_type,
+                    crate::termwindow::UIItemType::TabBar(
+                        crate::tabbar::TabBarItem::Tab { tab_idx, .. },
+                    ) if self.popup_tab_idx == Some(tab_idx)
+                )
+            });
+
+            if let Some(tab_ui) = tab_ui {
+                let tab_left_px = tab_ui.x as f32;
+                let tab_width_px = tab_ui.width as f32;
+
+                // Collect non-active pane info (pane_id, title) for popup
+                let pane_info: Vec<(PaneId, String)> = self
+                    .popup_tab_idx
+                    .and_then(|idx| {
+                        self.get_tab_information()
+                            .iter()
+                            .find(|tab| tab.tab_index == idx)
+                            .map(|tab| {
+                                tab.panes
+                                    .iter()
+                                    .filter(|p| !p.is_active)
+                                    .map(|p| (p.pane_id, p.title.clone()))
+                                    .collect()
+                            })
+                    })
+                    .unwrap_or_default();
+
+                let cell_h = self.render_metrics.cell_size.height as f32;
+                let tab_bar_height = self.tab_bar_pixel_height().unwrap_or(0.);
+                let tab_bar_y = if self.config.tab_bar_at_bottom {
+                    ((self.dimensions.pixel_height as f32)
+                        - (tab_bar_height + border.bottom.get() as f32))
+                        .max(0.)
+                } else {
+                    border.top.get() as f32
+                };
+                let num_rows = pane_info.len();
+
+                let popup_px = num_rows as f32 * cell_h;
+                let popup_top = 0f32.max(tab_bar_y - popup_px);
+                let mouse_y = event.coords.y as f32;
+                let mouse_x = event.coords.x as f32;
+
+                let in_popup_h =
+                    mouse_x >= tab_left_px && mouse_x < tab_left_px + tab_width_px;
+
+                if mouse_y >= popup_top && mouse_y < tab_bar_y && in_popup_h {
+                    // In popup area: update hover highlight
+                    let row = ((mouse_y - popup_top) / cell_h) as usize;
+                    let row = row.min(num_rows.saturating_sub(1));
+                    let new_hover = Some(row);
+                    if new_hover != self.popup_hover_row {
+                        self.popup_hover_row = new_hover;
+                        context.invalidate();
+                    }
+
+                    // Left click: activate the clicked pane
+                    if matches!(event.kind, WMEK::Press(MousePress::Left)) {
+                        if let Some((pane_id, _)) = pane_info.get(row) {
+                            let mux = Mux::get();
+                            let _ = mux.focus_pane_and_containing_tab(*pane_id);
+                            self.tab_popup_clear();
+                            // Clear mouse button state so the terminal doesn't
+                            // interpret the next Move as a drag selection.
+                            self.current_mouse_buttons.clear();
+                            self.current_mouse_capture = None;
+                            context.invalidate();
+                            context.set_cursor(Some(MouseCursor::Arrow));
+                            return;
+                        }
+                    }
+                } else if mouse_y < popup_top
+                    || mouse_y >= tab_bar_y + tab_bar_height
+                    || (mouse_y >= popup_top && mouse_y < tab_bar_y && !in_popup_h)
+                {
+                    // Outside popup+tabbar or inside Y-range but outside X: clear
+                    self.tab_popup_clear();
+                    context.invalidate();
+                } else {
+                    // On tab bar: keep popup visible, clear hover
+                    if self.popup_hover_row.is_some() {
+                        self.popup_hover_row = None;
+                        context.invalidate();
+                    }
+                }
+            }
+        }
+
         match mouse_dispatch_target(
             ui_item.is_some(),
             event.coords.y,
@@ -889,7 +982,7 @@ impl super::TermWindow {
     pub fn mouse_leave_impl(&mut self, context: &dyn WindowOps) {
         self.current_mouse_event = None;
         self.scrollbar.hovering = false;
-        self.update_title();
+        self.tab_popup_clear();
         context.set_cursor(Some(MouseCursor::Arrow));
         context.invalidate();
     }
@@ -1239,9 +1332,31 @@ impl super::TermWindow {
                         context.set_maximize_button_position(bounds);
                     }
                 }
-                TabBarItem::WindowButton(_)
-                | TabBarItem::Tab { .. }
-                | TabBarItem::NewTabButton { .. } => {}
+                TabBarItem::Tab { tab_idx, .. } => {
+                    // hide the popup if we moved over a different tab
+                    if self.show_tab_popup && self.popup_tab_idx != Some(tab_idx) {
+                        self.tab_popup_clear();
+                        context.invalidate();
+                    }
+                    // if moved over a tab, check if it has a multi-pane popup
+                    let tab_information = self.get_tab_information();
+                    tab_information
+                        .iter()
+                        .find(|tab| tab.tab_index == tab_idx)
+                        .map(|tab| {
+                            if tab.panes.len() > 1 {
+                                self.show_tab_popup = true;
+                                self.popup_tab_idx = Some(tab_idx);
+                                context.invalidate();
+                            }
+                        });
+                }
+                TabBarItem::WindowButton(_) | TabBarItem::NewTabButton { .. } => {
+                    if self.show_tab_popup {
+                        self.tab_popup_clear();
+                        context.invalidate();
+                    }
+                }
             },
             WMEK::VertWheel(n) => {
                 if self.config.mouse_wheel_scrolls_tabs {
@@ -1315,6 +1430,12 @@ impl super::TermWindow {
             context.invalidate();
         }
         context.set_cursor(Some(MouseCursor::Arrow));
+    }
+
+    fn tab_popup_clear(&mut self) {
+        self.show_tab_popup = false;
+        self.popup_hover_row = None;
+        self.popup_tab_idx = None;
     }
 
     pub fn mouse_event_scroll_thumb(

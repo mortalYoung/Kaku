@@ -3007,67 +3007,6 @@ local function pane_path_parts(pane)
   return parent, current
 end
 
-local function tab_path_parts(tab)
-  local pane = tab.active_pane
-  if not pane then
-    return '', ''
-  end
-
-  local source_cwd = pane.current_working_dir
-  local source_path = extract_path_from_cwd(source_cwd)
-  local path = source_path
-
-  if tab.is_active then
-    local pane_id = tostring(pane.pane_id)
-    local now = now_secs()
-    local runtime_cwd_ready = now >= runtime_cwd_warmup_until_secs
-    local cached = active_tab_cwd_cache[pane_id]
-    local should_refresh = (not cached)
-      or path == ''
-      or source_path ~= cached.source_path
-      or (now - cached.updated_at) >= active_tab_cwd_refresh_interval
-
-    if should_refresh then
-      local ok, runtime_cwd = pcall(function()
-        if not runtime_cwd_ready then
-          return nil
-        end
-        return pane:get_current_working_dir()
-      end)
-      if ok and runtime_cwd then
-        local runtime_path = extract_path_from_cwd(runtime_cwd)
-        if runtime_path ~= '' then
-          path = runtime_path
-        end
-      end
-
-      active_tab_cwd_cache[pane_id] = {
-        path = path,
-        source_path = source_path,
-        updated_at = now,
-      }
-    elseif cached and cached.path ~= '' then
-      path = cached.path
-    end
-  elseif path == '' and now_secs() >= runtime_cwd_warmup_until_secs then
-    local ok, runtime_cwd = pcall(function()
-      return pane:get_current_working_dir()
-    end)
-    if ok and runtime_cwd then
-      path = extract_path_from_cwd(runtime_cwd)
-    end
-  end
-
-  if path == '' then
-    return '', ''
-  end
-
-  local current = basename(path) or path
-  local parent_path = path:match('(.+)/[^/]+$') or ''
-  local parent = basename(parent_path) or parent_path
-  return parent, current
-end
-
 -- ===== Kaku Palette =====
 -- Highlight hues sit between Aura's vivid defaults and Aura "Soft":
 -- a third of the way back toward vivid, so colors stay punchy but not
@@ -3158,31 +3097,31 @@ local function clear_tab_bells_from_keys(pane_keys)
   end
 end
 
-local function tab_display_title(tab, effective_config)
-  local active_pane = tab and tab.active_pane or nil
-  local text = tab and tab.tab_title or ''
-
-  if text == '' and tab then
-    local parent, current = tab_path_parts(tab)
-    local basename_only = effective_config and effective_config.tab_title_show_basename_only
-    text = current
-    if not basename_only and parent ~= '' and current ~= '' then
-      text = parent .. '/' .. current
-    end
+local function tab_display_title(pane, effective_config)
+  if not pane then
+    return 'no cwd'
   end
-
-  if text == '' and active_pane then
-    text = resolve_remote_target_from_pane(active_pane) or ''
+  local parent, current = pane_path_parts(pane)
+  local basename_only = effective_config and effective_config.tab_title_show_basename_only
+  local text = current
+  if not basename_only and parent ~= '' and current ~= '' then
+    text = parent .. '/' .. current
   end
-  if text == '' and active_pane then
-    text = active_pane.title or ''
+  if text == '' then
+    text = resolve_remote_target_from_pane(pane) or ''
+  end
+  if text == '' then
+    text = pane.title or ''
   end
   if text == '' then
     text = 'no cwd'
   end
-
-  return text, active_pane
+  return text
 end
+
+wezterm.on('tab-display-title', function(pane, effective_config)
+  return tab_display_title(pane, effective_config)
+end)
 
 wezterm.on('format-tab-title', function(tab, tabs, panes, effective_config, hover, max_width)
   -- Evict stale cache only on the first tab to avoid O(n²) across the render cycle
@@ -3236,73 +3175,32 @@ wezterm.on('format-tab-title', function(tab, tabs, panes, effective_config, hove
     table.sort(own_panes, function(a, b) return a.pane_id < b.pane_id end)
   end
 
-  -- Multi-pane path: render each pane's cwd, active segment highlighted
+  -- Multi-pane path: show the active pane's path with an up-arrow indicator
   if #own_panes > 1 and tab.tab_title == '' then
-    local segments = {}
-    local seg_index = {}
-    local basename_only = effective_config and effective_config.tab_title_show_basename_only
+    local active_pane = nil
+    local text = 'Unknown'
     for _, p in ipairs(own_panes) do
-      local parent, current = pane_path_parts(p)
-      local seg_text = current
-      if not basename_only and parent ~= '' and current ~= '' then
-        seg_text = parent .. '/' .. current
-      end
-      if seg_text == '' then
-        seg_text = resolve_remote_target_from_pane(p) or p.title or '?'
-      end
-      local idx = seg_index[seg_text]
-      if idx then
-        if p.is_active then
-          segments[idx].active = true
-        end
-      else
-        segments[#segments + 1] = { text = seg_text, active = p.is_active }
-        seg_index[seg_text] = #segments
+      if p.is_active then
+        active_pane = p
+        break
       end
     end
+    if active_pane then
+      text = active_pane and tab_display_title(active_pane, effective_config) or ''
+      if text == '' then text = 'Unknown' end
+    end
 
-    -- Width budget: reserve 2 cells (leading space + trailing space/bell)
     local budget = math.max(4, max_width - 2)
-    local sep = ' \u{00b7} '  -- U+00B7 middle dot with spaces
-    local sep_len = 3          -- each separator is 3 chars
-
-    -- Compute total length
-    local total = 0
-    for i, seg in ipairs(segments) do
-      total = total + #seg.text
-      if i < #segments then
-        total = total + sep_len
-      end
+    local display = text .. ' \u{2191}'
+    if #display > budget then
+      display = text:sub(1, budget - 2) .. '\u{2026}' .. ' \u{2191}'
     end
 
-    -- Trim non-active segments to a single char if over budget
-    if total > budget then
-      for _, seg in ipairs(segments) do
-        if not seg.active and #seg.text > 1 then
-          total = total - (#seg.text - 1)
-          seg.text = '\u{2026}'  -- U+2026 ellipsis
-        end
-        if total <= budget then break end
-      end
-    end
-
-    -- Build FormatItem sequence
-    local items = { { Text = ' ' } }
-    for i, seg in ipairs(segments) do
-      if seg.active then
-        items[#items + 1] = { Attribute = { Intensity = 'Bold' } }
-        items[#items + 1] = { Foreground = { Color = fg_active } }
-      else
-        items[#items + 1] = { Attribute = { Intensity = 'Normal' } }
-        items[#items + 1] = { Foreground = { Color = fg_inactive_pane } }
-      end
-      items[#items + 1] = { Text = seg.text }
-      if i < #segments then
-        items[#items + 1] = { Attribute = { Intensity = 'Normal' } }
-        items[#items + 1] = { Foreground = { Color = fg_inactive_pane } }
-        items[#items + 1] = { Text = sep }
-      end
-    end
+    local items = {
+      { Text = ' ' },
+      { Foreground = { Color = fg_active } },
+      { Text = display },
+    }
 
     -- Trailing bell dot or space
     if effective_config.bell_tab_indicator ~= false then
@@ -3315,8 +3213,12 @@ wezterm.on('format-tab-title', function(tab, tabs, panes, effective_config, hove
     return items
   end
 
-  -- Single-pane path (original logic)
-  local text, active_pane = tab_display_title(tab, effective_config)
+  -- Single-pane path
+  local active_pane = tab and tab.active_pane
+  local text = tab and tab.tab_title or ''
+  if text == '' and active_pane then
+    text = tab_display_title(active_pane, effective_config)
+  end
   if active_pane and active_pane.is_zoomed then
     text = text .. ' [Z]'
   end
@@ -3364,7 +3266,7 @@ wezterm.on('format-window-title', function(tab, pane, tabs, _, effective_config)
   local text = ''
   local active_pane = pane or (active_tab and active_tab.active_pane) or nil
   if active_tab then
-    text, active_pane = tab_display_title(active_tab, effective_config)
+    text = tab_display_title(active_pane or (active_tab and active_tab.active_pane), effective_config)
   elseif active_pane then
     text = active_pane.title or ''
   end

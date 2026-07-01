@@ -777,6 +777,7 @@ pub struct TabInformation {
     pub is_active: bool,
     pub is_last_active: bool,
     pub active_pane: Option<PaneInformation>,
+    pub panes: Vec<PaneInformation>,
     pub window_id: MuxWindowId,
     pub tab_title: String,
 }
@@ -1062,6 +1063,10 @@ pub struct TermWindow {
     dragging: Option<(UIItem, MouseEvent)>,
     split_drag_state: Option<SplitDragState>,
     tab_drag_state: Option<TabDragState>,
+    /// Multi-pane hover popup state.
+    show_tab_popup: bool,
+    popup_hover_row: Option<usize>,
+    popup_tab_idx: Option<usize>,
     /// Tab render offset animations: tab_idx -> (start_offset, ease)
     /// start_offset is the pixel distance from which the tab animates back to 0.
     tab_position_animations: HashMap<usize, (f32, Rc<RefCell<ColorEase>>)>,
@@ -1653,6 +1658,9 @@ impl TermWindow {
             show_scroll_bar: config.enable_scroll_bar,
             tab_bar: TabBarState::default(),
             fancy_tab_bar: None,
+            show_tab_popup: false,
+            popup_hover_row: None,
+            popup_tab_idx: None,
             right_status: String::new(),
             left_status: String::new(),
             last_mouse_coords: (0, -1),
@@ -6105,6 +6113,11 @@ impl TermWindow {
                     .into_iter()
                     .find(|p| p.is_active)
                     .map(|p| Self::pos_pane_to_pane_info(&p)),
+                panes: tab
+                    .iter_panes()
+                    .into_iter()
+                    .map(|p| Self::pos_pane_to_pane_info(&p))
+                    .collect(),
             })
             .collect()
     }
