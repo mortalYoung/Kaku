@@ -4044,15 +4044,38 @@ impl TermWindow {
         let alphabet = args.alphabet.unwrap_or(config.launcher_alphabet.clone());
         let tabs = if flags.contains(LauncherFlags::TABS) {
             let tab_info = self.get_tab_information();
-            Some(
-                tab_info
-                    .iter()
-                    .map(|tab| LauncherTabEntry {
-                        title: crate::tabbar::compute_tab_plain_title(tab),
-                        tab_idx: tab.tab_index,
-                    })
-                    .collect(),
-            )
+            let mut entries = Vec::new();
+            for tab in &tab_info {
+                // Active pane title (individual, not combined multi-pane title)
+                let active_title = tab
+                    .active_pane
+                    .as_ref()
+                    .and_then(|pane| crate::tabbar::call_pane_display_title(pane, &self.config))
+                    .filter(|s| !s.is_empty())
+                    .or_else(|| tab.active_pane.as_ref().map(|p| p.title.clone()))
+                    .unwrap_or_else(|| crate::tabbar::compute_tab_plain_title(tab));
+
+                entries.push(LauncherTabEntry {
+                    title: active_title,
+                    tab_idx: tab.tab_index,
+                    pane_id: None,
+                });
+                // Multi-pane tab: add per-pane entries for non-active panes
+                // Title uses same logic as hover popup (Lua tab-display-title / fallback)
+                if tab.panes.len() > 1 {
+                    for pane in tab.panes.iter().filter(|p| !p.is_active) {
+                        let pane_title = crate::tabbar::call_pane_display_title(pane, &self.config)
+                            .filter(|s| !s.is_empty())
+                            .unwrap_or_else(|| pane.title.clone());
+                        entries.push(LauncherTabEntry {
+                            title: format!("  |- {}", pane_title),
+                            tab_idx: tab.tab_index,
+                            pane_id: Some(pane.pane_id),
+                        });
+                    }
+                }
+            }
+            Some(entries)
         } else {
             None
         };

@@ -834,7 +834,16 @@ impl super::TermWindow {
                     })
                     .unwrap_or_default();
 
-                let cell_h = self.render_metrics.cell_size.height as f32;
+                let cell_h = if self.config.tab_bar_at_bottom {
+                    // Match tabbar render: use font-native cell height, no line_height scaling
+                    self.fonts
+                        .default_font()
+                        .ok()
+                        .and_then(|f| Some(f.metrics().cell_height.get().ceil() as f32))
+                        .unwrap_or(self.render_metrics.cell_size.height as f32)
+                } else {
+                    self.render_metrics.cell_size.height as f32
+                };
                 let tab_bar_height = self.tab_bar_pixel_height().unwrap_or(0.);
                 let tab_bar_y = if self.config.tab_bar_at_bottom {
                     ((self.dimensions.pixel_height as f32)

@@ -36,11 +36,15 @@ pub use config::keyassignment::LauncherFlags;
 struct Entry {
     pub label: String,
     pub action: KeyAssignment,
+    pub pane_id: Option<PaneId>,
 }
 
 pub struct LauncherTabEntry {
     pub title: String,
     pub tab_idx: usize,
+    /// None = tab entry (focus tab's active pane).
+    /// Some(id) = pane-specific entry: focus pane via focus_pane_and_containing_tab.
+    pub pane_id: Option<PaneId>,
 }
 
 #[derive(Debug)]
@@ -110,7 +114,7 @@ impl LauncherArgs {
                     } else {
                         tab_title
                     };
-                    LauncherTabEntry { title, tab_idx }
+                    LauncherTabEntry { title, tab_idx, pane_id: None }
                 })
                 .collect()
         } else {
@@ -253,6 +257,7 @@ impl LauncherState {
                         },
                     },
                     action: KeyAssignment::SpawnCommandInNewTab(item.clone()),
+                    pane_id: None,
                 });
             }
         }
@@ -265,11 +270,13 @@ impl LauncherState {
                         domain: SpawnTabDomain::DomainName(domain.name.to_string()),
                         ..SpawnCommand::default()
                     }),
+                    pane_id: None,
                 }
             } else {
                 Entry {
                     label: format!("Attach {}", domain.label),
                     action: KeyAssignment::AttachDomain(domain.name.to_string()),
+                    pane_id: None,
                 }
             };
 
@@ -291,6 +298,7 @@ impl LauncherState {
                             name: Some(ws.clone()),
                             spawn: None,
                         },
+                        pane_id: None,
                     });
                 }
             }
@@ -303,6 +311,7 @@ impl LauncherState {
                     name: None,
                     spawn: None,
                 },
+                pane_id: None,
             });
         }
 
@@ -310,6 +319,7 @@ impl LauncherState {
             self.entries.push(Entry {
                 label: tab.title.clone(),
                 action: KeyAssignment::ActivateTab(tab.tab_idx as isize),
+                pane_id: tab.pane_id,
             });
         }
 
@@ -318,6 +328,7 @@ impl LauncherState {
                 self.entries.push(Entry {
                     label: format!("Set pane encoding to {encoding}"),
                     action: SetPaneEncoding(encoding),
+                    pane_id: None,
                 });
             }
         }
@@ -342,6 +353,7 @@ impl LauncherState {
                 self.entries.push(Entry {
                     label: cmd.brief.to_string(),
                     action: cmd.action,
+                    pane_id: None,
                 });
             }
         }
@@ -394,6 +406,7 @@ impl LauncherState {
                 key_entries.push(Entry {
                     label,
                     action: entry.action,
+                    pane_id: None,
                 });
             }
             key_entries.sort_by(|a, b| a.label.cmp(&b.label));
@@ -412,6 +425,7 @@ impl LauncherState {
                     fuzzy_help_text: None,
                     alphabet: None,
                 }),
+                pane_id: None,
             });
         }
     }
@@ -555,10 +569,17 @@ impl LauncherState {
     }
 
     fn launch(&mut self, active_idx: usize) -> bool {
-        let action = match self.filtered_entries.get(active_idx) {
-            Some(entry) => entry.action.clone(),
+        let (action, pane_id) = match self.filtered_entries.get(active_idx) {
+            Some(entry) => (entry.action.clone(), entry.pane_id),
             None => return false,
         };
+        // Focus specific pane before dispatching ActivateTab.
+        // This bypasses the overlay guard in ActivatePaneByIndex and matches
+        // the hover popup behavior (Mux::focus_pane_and_containing_tab).
+        if let Some(pane_id) = pane_id {
+            let mux = Mux::get();
+            let _ = mux.focus_pane_and_containing_tab(pane_id);
+        }
         if let KeyAssignment::ShowLauncherArgs(ref args) = action {
             if args.flags.contains(LauncherFlags::PANE_ENCODINGS) {
                 self.enter_encoding_submenu();
@@ -602,6 +623,7 @@ impl LauncherState {
             self.entries.push(Entry {
                 label: format!("Set pane encoding to {encoding}"),
                 action: SetPaneEncoding(encoding),
+                pane_id: None,
             });
         }
         self.help_text =

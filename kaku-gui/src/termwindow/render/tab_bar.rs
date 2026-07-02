@@ -235,10 +235,13 @@ impl crate::TermWindow {
                             );
                         }
                         // Left-align title text with 1-cell padding
+                        // Show "…" ellipsis if title overflows popup width
                         let mut col = 1;
+                        let mut truncated = false;
                         for c in title.chars() {
                             let cw = unicode_column_width(&c.to_string(), None);
                             if col + cw > popup_width_cells {
+                                truncated = true;
                                 break;
                             }
                             popup_line.insert_cell(
@@ -248,6 +251,14 @@ impl crate::TermWindow {
                                 SEQ_ZERO,
                             );
                             col += cw;
+                        }
+                        if truncated && col > 1 {
+                            popup_line.insert_cell(
+                                col.saturating_sub(1),
+                                wezterm_term::Cell::new_grapheme("\u{2026}", attrs.clone(), None),
+                                popup_width_cells,
+                                SEQ_ZERO,
+                            );
                         }
 
                         self.render_screen_line(
