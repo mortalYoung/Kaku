@@ -456,6 +456,11 @@ impl super::TermWindow {
             }
         }
 
+        // change_scaling rebuilt the LoadedFonts, so cached box-model shaping
+        // holds glyph advances from the old scale/DPI (and a reused Rc address
+        // could otherwise satisfy a stale key). Drop it wholesale.
+        self.box_text_shape_cache.borrow_mut().clear();
+
         if let Err(err) = self.recreate_texture_atlas(None) {
             log::error!("recreate_texture_atlas: {:#}", err);
         }

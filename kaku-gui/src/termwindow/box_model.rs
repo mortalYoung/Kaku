@@ -595,25 +595,40 @@ impl super::TermWindow {
 
         match &element.content {
             ElementContent::Text(s) => {
-                let window = self.window.as_ref().unwrap().clone();
                 let direction = wezterm_bidi::Direction::LeftToRight;
-                let infos = {
-                    let mut cache = self.box_text_shape_cache.borrow_mut();
-                    let key = format!("{:?}\x00{}", element.presentation, s);
-                    cache.entry(key).or_insert_with(|| {
-                        element
-                            .font
-                            .shape(
-                                &s,
-                                move || window.notify(TermWindowNotif::InvalidateShapeCache),
-                                BlockKey::filter_out_synthetic,
-                                element.presentation,
-                                direction,
-                                None,
-                                None,
-                            )
-                            .unwrap_or_default()
-                    }).clone()
+                // The font instance participates in the key: different UI
+                // fonts can shape the same text, and LoadedFonts are rebuilt
+                // when scale, DPI, or config change. Shape failures propagate
+                // instead of being cached as empty results.
+                let shape_key = format!(
+                    "{:p}\x00{:?}\x00{}",
+                    Rc::as_ptr(&element.font),
+                    element.presentation,
+                    s
+                );
+                let cached = self
+                    .box_text_shape_cache
+                    .borrow_mut()
+                    .get(shape_key.as_str())
+                    .cloned();
+                let infos = match cached {
+                    Some(infos) => infos,
+                    None => {
+                        let window = self.window.as_ref().unwrap().clone();
+                        let infos = element.font.shape(
+                            &s,
+                            move || window.notify(TermWindowNotif::InvalidateShapeCache),
+                            BlockKey::filter_out_synthetic,
+                            element.presentation,
+                            direction,
+                            None,
+                            None,
+                        )?;
+                        self.box_text_shape_cache
+                            .borrow_mut()
+                            .put(shape_key, infos.clone());
+                        infos
+                    }
                 };
                 let mut computed_cells = vec![];
                 let mut glyph_cache = context.gl_state.glyph_cache.borrow_mut();
