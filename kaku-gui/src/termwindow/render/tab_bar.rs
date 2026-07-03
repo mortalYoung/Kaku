@@ -209,8 +209,33 @@ impl crate::TermWindow {
                         .clone()
                         .unwrap_or_else(TabBarColors::default);
 
+                    let popup_bg = tab_bar_colors.inactive_tab().bg_color.to_linear();
+                    self.filled_rectangle(
+                        layers,
+                        1,
+                        euclid::rect(tab_left_px, popup_top, popup_width_px, popup_px),
+                        popup_bg,
+                    )?;
+
                     for (row, pane) in non_active.iter().enumerate() {
                         let hovered = self.popup_hover_row == Some(row);
+
+                        // Hovered row gets its background on layer 1 (above pane text)
+                        if hovered {
+                            let hover_bg =
+                                tab_bar_colors.inactive_tab_hover().bg_color.to_linear();
+                            self.filled_rectangle(
+                                layers,
+                                1,
+                                euclid::rect(
+                                    tab_left_px,
+                                    popup_top + row as f32 * cell_h,
+                                    popup_width_px,
+                                    cell_h,
+                                ),
+                                hover_bg,
+                            )?;
+                        }
 
                         let attrs = if hovered {
                             tab_bar_colors.inactive_tab_hover().as_cell_attributes()
