@@ -570,6 +570,10 @@ impl super::TermWindow {
         // Keep modal focus exclusive: forward all mouse events to it and stop
         // routing into pane/tab UI while active.
         if let Some(modal) = self.get_modal() {
+            if let WMEK::Release(press) = &event.kind {
+                self.finish_mouse_release(*press);
+            }
+
             let (kind, button) = wmek_to_tmek_and_button(&event);
             let modal_event = wezterm_term::MouseEvent {
                 kind,
