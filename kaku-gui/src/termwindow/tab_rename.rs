@@ -9,7 +9,7 @@ use config::{Dimension, DimensionContext, TabBarColors};
 use mux::tab::TabId;
 use mux::Mux;
 use std::cell::{Ref, RefCell};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use termwiz::cell::{unicode_column_width, CellAttributes};
 use termwiz::surface::SEQ_ZERO;
 use wezterm_term::color::{ColorAttribute, ColorPalette};
@@ -33,6 +33,8 @@ pub struct TabRenameModal {
     value: RefCell<String>,
     cursor: RefCell<usize>,
     selection: RefCell<Option<(usize, usize)>>,
+    /// Record last cursor movement timestamp for ensure not blinking as cursor moved.
+    last_movement: RefCell<Instant>,
 }
 
 impl TabRenameModal {
@@ -74,6 +76,7 @@ impl TabRenameModal {
             value: RefCell::new(value),
             cursor: RefCell::new(cursor),
             selection: RefCell::new(None),
+            last_movement: RefCell::new(Instant::now()),
         };
         modal.reconfigure(term_window);
         Ok(modal)
@@ -165,6 +168,10 @@ impl TabRenameModal {
         self.selection.borrow_mut().take();
     }
 
+    fn mark_movement(&self) {
+        *self.last_movement.borrow_mut() = Instant::now();
+    }
+
     fn select_all(&self) -> bool {
         let len = self.value_len();
         if len == 0 {
@@ -172,6 +179,7 @@ impl TabRenameModal {
         }
         *self.selection.borrow_mut() = Some((0, len));
         *self.cursor.borrow_mut() = len;
+        self.mark_movement();
         true
     }
 
@@ -196,11 +204,13 @@ impl TabRenameModal {
         value.replace_range(start_byte..end_byte, "");
         *self.cursor.borrow_mut() = start;
         self.clear_selection();
+        self.mark_movement();
         true
     }
 
     fn insert_char(&self, c: char) {
         let _ = self.delete_selection();
+        self.mark_movement();
         let mut value = self.value.borrow_mut();
         let mut cursor = self.cursor.borrow_mut();
         let byte_idx = Self::byte_idx_for_char(&value, *cursor);
@@ -211,6 +221,7 @@ impl TabRenameModal {
 
     fn backspace(&self) -> bool {
         if self.delete_selection() {
+            self.mark_movement();
             return true;
         }
 
@@ -224,11 +235,13 @@ impl TabRenameModal {
         let start = Self::byte_idx_for_char(&value, cursor.saturating_sub(1));
         value.replace_range(start..end, "");
         *cursor -= 1;
+        self.mark_movement();
         true
     }
 
     fn delete(&self) -> bool {
         if self.delete_selection() {
+            self.mark_movement();
             return true;
         }
 
@@ -241,6 +254,7 @@ impl TabRenameModal {
         let start = Self::byte_idx_for_char(&value, cursor);
         let end = Self::byte_idx_for_char(&value, cursor + 1);
         value.replace_range(start..end, "");
+        self.mark_movement();
         true
     }
 
@@ -248,6 +262,7 @@ impl TabRenameModal {
         if let Some((start, _)) = self.selection_bounds() {
             *self.cursor.borrow_mut() = start;
             self.clear_selection();
+            self.mark_movement();
             return true;
         }
 
@@ -256,6 +271,7 @@ impl TabRenameModal {
             return false;
         }
         *cursor -= 1;
+        self.mark_movement();
         true
     }
 
@@ -263,6 +279,7 @@ impl TabRenameModal {
         if let Some((_, end)) = self.selection_bounds() {
             *self.cursor.borrow_mut() = end;
             self.clear_selection();
+            self.mark_movement();
             return true;
         }
 
@@ -272,6 +289,7 @@ impl TabRenameModal {
             return false;
         }
         *cursor += 1;
+        self.mark_movement();
         true
     }
 
@@ -282,6 +300,7 @@ impl TabRenameModal {
             return false;
         }
         *cursor = 0;
+        self.mark_movement();
         true
     }
 
@@ -293,6 +312,7 @@ impl TabRenameModal {
             return false;
         }
         *cursor = len;
+        self.mark_movement();
         true
     }
 
@@ -304,6 +324,7 @@ impl TabRenameModal {
         value.clear();
         *self.cursor.borrow_mut() = 0;
         self.clear_selection();
+        self.mark_movement();
         true
     }
 
@@ -650,18 +671,29 @@ impl TabRenameModal {
             DeadKeyStatus::None | DeadKeyStatus::Composing(_) => None,
         };
 
-        let epoch = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_else(|_| Duration::from_secs(0));
-        let blink_period_ms = 1000u128;
-        let on_phase_ms = 550u128;
-        let phase = epoch.as_millis() % blink_period_ms;
-        let cursor_visible = phase < on_phase_ms;
-        let ms_to_next_toggle = if cursor_visible {
-            on_phase_ms.saturating_sub(phase)
+        const MOVEMENT_IDLE_MS: u128 = 500;
+        let movement_elapsed = self.last_movement.borrow().elapsed().as_millis();
+        let ms_to_next_toggle;
+
+        let cursor_visible = if movement_elapsed < MOVEMENT_IDLE_MS {
+            ms_to_next_toggle = MOVEMENT_IDLE_MS.saturating_sub(movement_elapsed);
+            true
         } else {
-            blink_period_ms.saturating_sub(phase)
+            let epoch = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap_or_else(|_| Duration::from_secs(0));
+            let blink_period_ms = 1000u128;
+            let on_phase_ms = 550u128;
+            let phase = epoch.as_millis() % blink_period_ms;
+            let visible = phase < on_phase_ms;
+            ms_to_next_toggle = if visible {
+                on_phase_ms.saturating_sub(phase)
+            } else {
+                blink_period_ms.saturating_sub(phase)
+            };
+            visible
         };
+
         term_window.update_next_frame_time(Some(
             std::time::Instant::now()
                 + Duration::from_millis(ms_to_next_toggle.max(1).min(u128::from(u64::MAX)) as u64),
@@ -672,10 +704,10 @@ impl TabRenameModal {
         let padding = BoxDimension {
             left: Dimension::Pixels((0.5 * metrics.cell_size.width as f32) + 4.0),
             right: Dimension::Pixels((0.5 * metrics.cell_size.width as f32) + 4.0),
-            top: Dimension::Cells(0.2),
-            bottom: Dimension::Cells(0.25),
+            top: Dimension::Pixels(0.0),
+            bottom: Dimension::Pixels(0.0),
         };
-        let border = BoxDimension::new(Dimension::Pixels(1.0));
+        let border = BoxDimension::new(Dimension::Pixels(0.0));
 
         let mut row = vec![];
         let cursor_element_idx;
@@ -778,12 +810,12 @@ impl TabRenameModal {
         let x = x.min(anchor_right - min_width).min(max_x).max(0.0);
 
         let row = Element::new(&font, ElementContent::Children(row))
-            .vertical_align(VerticalAlign::Middle)
+            .vertical_align(VerticalAlign::Bottom)
             .margin(BoxDimension {
                 left: Dimension::Pixels(0.0),
                 right: Dimension::Pixels(0.0),
-                top: Dimension::Pixels(1.0),
-                bottom: Dimension::Pixels(-1.0),
+                top: Dimension::Pixels(0.5),
+                bottom: Dimension::Cells(0.1),
             });
         let content_min_width = Self::content_min_extent(
             min_width,
