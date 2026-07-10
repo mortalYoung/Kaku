@@ -9,7 +9,7 @@ use config::{Dimension, DimensionContext, TabBarColors};
 use mux::tab::TabId;
 use mux::Mux;
 use std::cell::{Ref, RefCell};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 use termwiz::cell::{unicode_column_width, CellAttributes};
 use termwiz::surface::SEQ_ZERO;
 use wezterm_term::color::{ColorAttribute, ColorPalette};
@@ -33,7 +33,8 @@ pub struct TabRenameModal {
     value: RefCell<String>,
     cursor: RefCell<usize>,
     selection: RefCell<Option<(usize, usize)>>,
-    /// Record last cursor movement timestamp for ensure not blinking as cursor moved.
+    /// Timestamp of the last cursor movement; the blink cycle restarts
+    /// from the solid phase whenever it updates.
     last_movement: RefCell<Instant>,
 }
 
@@ -671,27 +672,17 @@ impl TabRenameModal {
             DeadKeyStatus::None | DeadKeyStatus::Composing(_) => None,
         };
 
-        const MOVEMENT_IDLE_MS: u128 = 500;
-        let movement_elapsed = self.last_movement.borrow().elapsed().as_millis();
-        let ms_to_next_toggle;
-
-        let cursor_visible = if movement_elapsed < MOVEMENT_IDLE_MS {
-            ms_to_next_toggle = MOVEMENT_IDLE_MS.saturating_sub(movement_elapsed);
-            true
+        // Anchor the blink cycle to the last cursor movement: every edit
+        // restarts the cycle at the solid phase, so the cursor never blinks
+        // away mid-typing and never jumps straight into the off phase.
+        let blink_period_ms = 1000u128;
+        let on_phase_ms = 550u128;
+        let phase = self.last_movement.borrow().elapsed().as_millis() % blink_period_ms;
+        let cursor_visible = phase < on_phase_ms;
+        let ms_to_next_toggle = if cursor_visible {
+            on_phase_ms - phase
         } else {
-            let epoch = SystemTime::now()
-                .duration_since(UNIX_EPOCH)
-                .unwrap_or_else(|_| Duration::from_secs(0));
-            let blink_period_ms = 1000u128;
-            let on_phase_ms = 550u128;
-            let phase = epoch.as_millis() % blink_period_ms;
-            let visible = phase < on_phase_ms;
-            ms_to_next_toggle = if visible {
-                on_phase_ms.saturating_sub(phase)
-            } else {
-                blink_period_ms.saturating_sub(phase)
-            };
-            visible
+            blink_period_ms - phase
         };
 
         term_window.update_next_frame_time(Some(
